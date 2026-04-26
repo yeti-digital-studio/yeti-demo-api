@@ -13,6 +13,7 @@ env:
   INTERNAL_PORT: "8080"
   VISIBILITY: public
   R2_BUCKET: yeti-grid
+  DATABASE_TYPE: postgres
 
 jobs:
   deploy:
@@ -104,6 +105,7 @@ jobs:
             --arg artifact_cid "$ARTIFACT_CID" \
             --arg visibility "$VISIBILITY" \
             --arg nonce "$NONCE" \
+            --arg database_type "$DATABASE_TYPE" \
             --argjson internal_port "$INTERNAL_PORT" \
             --argjson timestamp "$TIMESTAMP" \
             '{
@@ -116,7 +118,17 @@ jobs:
               visibility: $visibility,
               nonce: $nonce,
               timestamp: $timestamp
-            }' > deploy-payload.json
+            } + (
+                if $database_type != "" then
+                  {
+                    database: {
+                      type: $database_type
+                    }
+                  }
+                else
+                  {}
+                end
+              )' > deploy-payload.json
 
           node <<'EOF'
           const fs = require("fs");
