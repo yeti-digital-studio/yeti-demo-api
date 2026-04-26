@@ -116,8 +116,6 @@ jobs:
               artifact_cid: $artifact_cid,
               internal_port: $internal_port,
               visibility: $visibility,
-              nonce: $nonce,
-              timestamp: $timestamp
             } + (
                 if $database_type != "" then
                   {
@@ -128,7 +126,11 @@ jobs:
                 else
                   {}
                 end
-              )' > deploy-payload.json
+              )
+              + {
+                nonce: $nonce,
+                timestamp: $timestamp
+              }' > deploy-payload.json
 
           node <<'EOF'
           const fs = require("fs");
