@@ -1,0 +1,80 @@
+name: Deploy to Yeti Grid
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+env:
+  IMAGE_NAME: yeti-demo:latest
+  APP_ID: test-api
+  INTERNAL_PORT: "8080"
+  VISIBILITY: public
+  R2_BUCKET: yeti-grid
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Build Docker image
+        run: docker build -t "$IMAGE_NAME" .
+
+      - name: Save Docker image as tar
+        run: docker save "$IMAGE_NAME" -o image.tar
+
+      - name: Configure R2 credentials
+        run: |
+          mkdir -p ~/.aws
+
+          cat > ~/.aws/credentials <<EOF
+          [default]
+          aws_access_key_id=${{ secrets.R2_ACCESS_KEY_ID }}
+          aws_secret_access_key=${{ secrets.R2_SECRET_ACCESS_KEY }}
+          EOF
+
+          cat > ~/.aws/config <<EOF
+          [default]
+          region=auto
+          output=json
+          EOF
+
+      - name: Upload artifact to R2
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          OBJECT_KEY="deployments/${APP_ID}/${GITHUB_SHA}/image.tar"
+          echo "OBJECT_KEY=$OBJECT_KEY" >> "$GITHUB_ENV"
+
+          aws s3 cp image.tar \
+            "s3://${R2_BUCKET}/${OBJECT_KEY}" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+
+      - name: Create presigned artifact URL
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+        run: |
+          ARTIFACT_URL=$(aws s3 presign \
+            "s3://${R2_BUCKET}/${OBJECT_KEY}" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --expires-in 900)
+
+          echo "ARTIFACT_URL=$ARTIFACT_URL" >> "$GITHUB_ENV"
+
+      - name: Deploy to Yeti Grid
+        env:
+          DEPLOY_URL: ${{ secrets.YETI_GRID_DEPLOY_URL }}
+        run: |
+          curl -f -X POST "$DEPLOY_URL" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"app_id\": \"${APP_ID}\",
+              \"image_name\": \"${IMAGE_NAME}\",
+              \"artifact_url\": \"${ARTIFACT_URL}\",
+              \"internal_port\": ${INTERNAL_PORT},
+              \"visibility\": \"${VISIBILITY}\"
+            }"
