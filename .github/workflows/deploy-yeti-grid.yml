@@ -37,6 +37,8 @@ jobs:
 
       - name: Compute artifact CID
         run: |
+          ipfs init
+
           ARTIFACT_CID=$(ipfs add \
             --cid-version=1 \
             --raw-leaves=true \
