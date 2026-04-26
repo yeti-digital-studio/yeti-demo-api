@@ -9,6 +9,7 @@ on:
 env:
   IMAGE_NAME: yeti-demo:latest
   APP_ID: test-api
+  ENS_NAME: dorion.eth
   INTERNAL_PORT: "8080"
   VISIBILITY: public
   R2_BUCKET: yeti-grid
@@ -26,6 +27,24 @@ jobs:
 
       - name: Save Docker image as tar
         run: docker save "$IMAGE_NAME" -o image.tar
+
+      - name: Install IPFS CLI
+        run: |
+          KUBO_VERSION="v0.35.0"
+          curl -L "https://dist.ipfs.tech/kubo/${KUBO_VERSION}/kubo_${KUBO_VERSION}_linux-amd64.tar.gz" -o kubo.tar.gz
+          tar -xzf kubo.tar.gz
+          sudo bash kubo/install.sh
+
+      - name: Compute artifact CID
+        run: |
+          ARTIFACT_CID=$(ipfs add \
+            --cid-version=1 \
+            --raw-leaves=true \
+            --only-hash \
+            -q image.tar)
+
+          echo "ARTIFACT_CID=$ARTIFACT_CID" >> "$GITHUB_ENV"
+          echo "Artifact CID: $ARTIFACT_CID"
 
       - name: Configure R2 credentials
         run: |
@@ -65,16 +84,75 @@ jobs:
 
           echo "ARTIFACT_URL=$ARTIFACT_URL" >> "$GITHUB_ENV"
 
+      - name: Install signing dependency
+        run: npm install ethers@latest
+
+      - name: Create and sign deploy payload
+        env:
+          DEPLOY_PRIVATE_KEY: ${{ secrets.DEPLOY_PRIVATE_KEY }}
+        run: |
+          TIMESTAMP=$(date +%s)
+          NONCE="${GITHUB_RUN_ID}-${GITHUB_SHA}"
+
+          jq -n \
+            --arg ens_name "$ENS_NAME" \
+            --arg app_id "$APP_ID" \
+            --arg image_name "$IMAGE_NAME" \
+            --arg artifact_url "$ARTIFACT_URL" \
+            --arg artifact_cid "$ARTIFACT_CID" \
+            --arg visibility "$VISIBILITY" \
+            --arg nonce "$NONCE" \
+            --argjson internal_port "$INTERNAL_PORT" \
+            --argjson timestamp "$TIMESTAMP" \
+            '{
+              ens_name: $ens_name,
+              app_id: $app_id,
+              image_name: $image_name,
+              artifact_url: $artifact_url,
+              artifact_cid: $artifact_cid,
+              internal_port: $internal_port,
+              visibility: $visibility,
+              nonce: $nonce,
+              timestamp: $timestamp
+            }' > deploy-payload.json
+
+          node <<'EOF'
+          const fs = require("fs");
+          const { Wallet } = require("ethers");
+
+          const payload = JSON.parse(fs.readFileSync("deploy-payload.json", "utf8"));
+
+          const canonicalPayload = JSON.stringify(payload);
+          const wallet = new Wallet(process.env.DEPLOY_PRIVATE_KEY);
+
+          async function main() {
+            const signature = await wallet.signMessage(canonicalPayload);
+
+            const signedPayload = {
+              ...payload,
+              signature,
+            };
+
+            fs.writeFileSync(
+              "signed-deploy-payload.json",
+              JSON.stringify(signedPayload, null, 2)
+            );
+
+            console.log("Deploy signer:", wallet.address);
+            console.log("Signed payload:");
+            console.log(JSON.stringify(signedPayload, null, 2));
+          }
+
+          main().catch((error) => {
+            console.error(error);
+            process.exit(1);
+          });
+          EOF
+
       - name: Deploy to Yeti Grid
         env:
           DEPLOY_URL: ${{ secrets.YETI_GRID_DEPLOY_URL }}
         run: |
           curl -f -X POST "$DEPLOY_URL" \
             -H "Content-Type: application/json" \
-            -d "{
-              \"app_id\": \"${APP_ID}\",
-              \"image_name\": \"${IMAGE_NAME}\",
-              \"artifact_url\": \"${ARTIFACT_URL}\",
-              \"internal_port\": ${INTERNAL_PORT},
-              \"visibility\": \"${VISIBILITY}\"
-            }"
+            --data @signed-deploy-payload.json
