@@ -1,3 +1,5 @@
 /.idea/
+/dist/
+/node_modules/
 /yeti-demo.tar
 /yeti-demo-api.iml

@@ -1,4 +1,4 @@
-name: Deploy to Yeti Grid
+name: Deploy Service to Yeti Grid
 
 on:
   workflow_dispatch:
@@ -87,17 +87,27 @@ jobs:
 
           echo "ARTIFACT_URL=$ARTIFACT_URL" >> "$GITHUB_ENV"
 
-      - name: Install signing dependency
-        run: npm install ethers@latest
+      - name: Build env array
+        run: |
+          jq -n \
+            --arg db_user "${{ secrets.DATABASE_USER }}" \
+            --arg db_pass "${{ secrets.DATABASE_PASSWORD }}" \
+            --arg db_name "${{ secrets.DATABASE_NAME }}" \
+            --arg pg_root "${{ secrets.POSTGRES_ROOT_PASSWORD }}" \
+            '[
+              {name:"DATABASE_USER", value:$db_user},
+              {name:"DATABASE_PASSWORD", value:$db_pass},
+              {name:"DATABASE_NAME", value:$db_name},
+              {name:"POSTGRES_ROOT_PASSWORD", value:$pg_root}
+            ] | sort_by(.name)' > env.json
 
-      - name: Create and sign deploy payload
-        env:
-          DEPLOY_PRIVATE_KEY: ${{ secrets.DEPLOY_PRIVATE_KEY }}
+      - name: Create deploy payload
         run: |
           TIMESTAMP=$(date +%s)
           NONCE="${GITHUB_RUN_ID}-${GITHUB_SHA}"
 
           jq -n \
+            --arg type "service" \
             --arg ens_name "$ENS_NAME" \
             --arg app_id "$APP_ID" \
             --arg image_name "$IMAGE_NAME" \
@@ -105,10 +115,12 @@ jobs:
             --arg artifact_cid "$ARTIFACT_CID" \
             --arg visibility "$VISIBILITY" \
             --arg nonce "$NONCE" \
-            --arg database_type "$DATABASE_TYPE" \
             --argjson internal_port "$INTERNAL_PORT" \
             --argjson timestamp "$TIMESTAMP" \
+            --slurpfile env env.json \
+            --arg database_type "$DATABASE_TYPE" \
             '{
+              type: $type,
               ens_name: $ens_name,
               app_id: $app_id,
               image_name: $image_name,
@@ -116,21 +128,19 @@ jobs:
               artifact_cid: $artifact_cid,
               internal_port: $internal_port,
               visibility: $visibility,
-            } + (
-                if $database_type != "" then
-                  {
-                    database: {
-                      type: $database_type
-                    }
-                  }
-                else
-                  {}
-                end
-              )
-              + {
-                nonce: $nonce,
-                timestamp: $timestamp
-              }' > deploy-payload.json
+              env: $env[0],
+              database: {
+                type: $database_type
+              },
+              nonce: $nonce,
+              timestamp: $timestamp
+            }' > deploy-payload.json
+
+      - name: Sign deploy payload
+        env:
+          DEPLOY_PRIVATE_KEY: ${{ secrets.DEPLOY_PRIVATE_KEY }}
+        run: |
+          npm install ethers@latest
 
           node <<'EOF'
           const fs = require("fs");
@@ -138,25 +148,22 @@ jobs:
 
           const payload = JSON.parse(fs.readFileSync("deploy-payload.json", "utf8"));
 
-          const canonicalPayload = JSON.stringify(payload);
+          if (Array.isArray(payload.env)) {
+            payload.env.sort((a, b) => a.name.localeCompare(b.name));
+          }
+
+          const message = JSON.stringify(payload);
           const wallet = new Wallet(process.env.DEPLOY_PRIVATE_KEY);
 
           async function main() {
-            const signature = await wallet.signMessage(canonicalPayload);
-
-            const signedPayload = {
-              ...payload,
-              signature,
-            };
+            const signature = await wallet.signMessage(message);
 
             fs.writeFileSync(
               "signed-deploy-payload.json",
-              JSON.stringify(signedPayload, null, 2)
+              JSON.stringify({ ...payload, signature })
             );
 
             console.log("Deploy signer:", wallet.address);
-            console.log("Signed payload:");
-            console.log(JSON.stringify(signedPayload, null, 2));
           }
 
           main().catch((error) => {
@@ -165,7 +172,7 @@ jobs:
           });
           EOF
 
-      - name: Deploy to Yeti Grid
+      - name: Deploy service to Yeti Grid
         env:
           DEPLOY_URL: ${{ secrets.YETI_GRID_DEPLOY_URL }}
         run: |
